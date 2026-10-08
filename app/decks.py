@@ -242,7 +242,7 @@ def list_all(conn: sqlite3.Connection, *, include_archived: bool = False) -> lis
 
 def _owned_percent(conn: sqlite3.Connection, deck_id: int) -> float:
     rows = conn.execute(
-        "SELECT c.oracle_id, SUM(dc.quantity) AS need FROM deck_cards dc JOIN cards c ON c.id = dc.card_id "
+        "SELECT c.oracle_id, SUM(dc.quantity) AS need FROM deck_cards dc CROSS JOIN cards c ON c.id = dc.card_id "
         "WHERE dc.deck_id = ? AND dc.role IN ('main','commander','companion') GROUP BY c.oracle_id",
         (deck_id,),
     ).fetchall()
@@ -381,7 +381,7 @@ def conflicts(
 ) -> list[dict[str, Any]]:
     """Cards needed by non-archived decks (counted roles) beyond the copies owned."""
     rows = conn.execute(
-        "SELECT c.oracle_id, SUM(dc.quantity) AS needed FROM deck_cards dc JOIN cards c ON c.id = dc.card_id "
+        "SELECT c.oracle_id, SUM(dc.quantity) AS needed FROM deck_cards dc CROSS JOIN cards c ON c.id = dc.card_id "
         "JOIN decks d ON d.id = dc.deck_id WHERE d.archived = 0 AND dc.role IN ('main','commander','companion') "
         "GROUP BY c.oracle_id"
     ).fetchall()
@@ -410,7 +410,8 @@ def conflicts(
             (oracle_id,),
         ).fetchone()
         decks_using = conn.execute(
-            "SELECT d.id, d.name, SUM(dc.quantity) AS quantity FROM deck_cards dc JOIN cards c ON c.id = dc.card_id "
+            "SELECT d.id, d.name, SUM(dc.quantity) AS quantity FROM deck_cards dc "
+            "CROSS JOIN cards c ON c.id = dc.card_id "
             "JOIN decks d ON d.id = dc.deck_id WHERE c.oracle_id = ? AND d.archived = 0 "
             "AND dc.role IN ('main','commander','companion') "
             "GROUP BY d.id ORDER BY d.name",

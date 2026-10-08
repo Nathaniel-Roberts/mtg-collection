@@ -11,7 +11,7 @@ from typing import Any
 from app import db
 from app.catalogue import CONDITIONS, FINISHES, _like_contains, card_view, fts_query
 from app.pricing.fx import Rates
-from app.pricing.snapshots import EUR_FOR_FINISH, USD_FOR_FINISH, collection_totals
+from app.pricing.snapshots import EUR_FOR_FINISH, USD_FOR_FINISH
 
 
 class CollectionError(ValueError):
@@ -27,7 +27,7 @@ ENTRY_SELECT = (
     "c.image_back_normal, c.card_faces, c.scryfall_uri, c.artist, c.promo, c.digital, c.paper, c.power, "
     "c.toughness, c.loyalty, c.image_large, c.image_art_crop, s.name AS set_name, "
     "(SELECT group_concat(tag, char(31)) FROM entry_tags t WHERE t.entry_id = e.id) AS tag_list "
-    "FROM collection_entries e JOIN cards c ON c.id = e.card_id JOIN sets s ON s.code = c.set_code"
+    "FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id JOIN sets s ON s.code = c.set_code"
 )
 
 
@@ -277,8 +277,8 @@ def list_entries(
         where.append("e.id IN (SELECT entry_id FROM entry_tags WHERE tag = ?)")
         params.append(tag)
     if legal_in:
-        where.append("json_extract(c.legalities, ?) IN ('legal', 'restricted')")
-        params.append(f"$.{legal_in}")
+        where.append("instr(c.legal_formats, ?) > 0")
+        params.append(f" {legal_in} ")
     if cmc_min is not None:
         where.append("c.cmc >= ?")
         params.append(cmc_min)
@@ -296,14 +296,19 @@ def list_entries(
     }
     order = orders.get(sort, orders["name"])
     total = conn.execute(
-        f"SELECT COUNT(*) FROM collection_entries e JOIN cards c ON c.id = e.card_id WHERE {clause}",
+        f"SELECT COUNT(*) FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id WHERE {clause}",
         params,
     ).fetchone()[0]
     offset = (max(1, page) - 1) * per_page
-    rows = conn.execute(
-        f"{ENTRY_SELECT} WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
-        [*params, per_page, offset],
-    ).fetchall()
+    page_sql = (
+        f"SELECT e.id FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id WHERE {clause} "
+        f"ORDER BY {order} LIMIT ? OFFSET ?"
+    )
+    ids = [r[0] for r in conn.execute(page_sql, [*params, per_page, offset])]
+    if not ids:
+        return [], total
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(f"{ENTRY_SELECT} WHERE e.id IN ({marks}) ORDER BY {order}", ids).fetchall()
     return rows, total
 
 
@@ -312,7 +317,8 @@ def owned_by_oracle(conn: sqlite3.Connection, oracle_ids: list[str]) -> dict[str
         return {}
     marks = ",".join("?" * len(oracle_ids))
     rows = conn.execute(
-        "SELECT c.oracle_id, SUM(e.quantity) AS qty FROM collection_entries e JOIN cards c ON c.id = e.card_id "
+        "SELECT c.oracle_id, SUM(e.quantity) AS qty FROM collection_entries e "
+        "CROSS JOIN cards c ON c.id = e.card_id "
         f"WHERE c.oracle_id IN ({marks}) GROUP BY c.oracle_id",
         oracle_ids,
     ).fetchall()
@@ -322,63 +328,14 @@ def owned_by_oracle(conn: sqlite3.Connection, oracle_ids: list[str]) -> dict[str
 def owned_printings(conn: sqlite3.Connection, oracle_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT e.id, e.card_id, c.set_code, c.collector_number, e.finish, e.condition, e.language, e.quantity "
-        "FROM collection_entries e JOIN cards c ON c.id = e.card_id WHERE c.oracle_id = ? "
+        "FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id WHERE c.oracle_id = ? "
         "ORDER BY c.released_at DESC, e.finish",
         (oracle_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def summary(
-    conn: sqlite3.Connection, rates: Rates, group_by: list[str] | None = None
-) -> dict[str, Any]:
-    groups = group_by or ["color_identity", "type", "set", "rarity", "finish", "condition"]
-    out: dict[str, Any] = {
-        "totals": collection_totals(conn, rates),
-        "rates": {
-            "usd_aud": rates.usd_aud,
-            "eur_aud": rates.eur_aud,
-            "source": rates.source,
-            "day": rates.day,
-        },
-    }
-    value_expr = (
-        f"ROUND(COALESCE(SUM(e.quantity * CASE WHEN {USD_FOR_FINISH} IS NOT NULL "
-        f"THEN CAST({USD_FOR_FINISH} AS REAL) * :usd_aud "
-        f"WHEN {EUR_FOR_FINISH} IS NOT NULL THEN CAST({EUR_FOR_FINISH} AS REAL) * :eur_aud ELSE 0 END), 0), 2) AS aud, "
-        f"ROUND(COALESCE(SUM(e.quantity * CAST({USD_FOR_FINISH} AS REAL)), 0), 2) AS usd"
-    )
-    p = {"usd_aud": rates.usd_aud or 0.0, "eur_aud": rates.eur_aud or 0.0}
-    base = "FROM collection_entries e JOIN cards c ON c.id = e.card_id"
-    keys = {
-        "color_identity": "CASE WHEN c.color_identity = '' THEN 'C' ELSE c.color_identity END",
-        "set": "c.set_code",
-        "rarity": "c.rarity",
-        "finish": "e.finish",
-        "condition": "e.condition",
-        "language": "e.language",
-    }
-    for group in groups:
-        if group == "type":
-            out["by_type"] = _by_type(conn, rates)
-            continue
-        key = keys.get(group)
-        if key is None:
-            continue
-        rows = conn.execute(
-            f"SELECT {key} AS k, COUNT(DISTINCT c.oracle_id) AS cards, SUM(e.quantity) AS copies, {value_expr} "
-            f"{base} GROUP BY k ORDER BY copies DESC" + (" LIMIT 30" if group == "set" else ""),
-            p,
-        ).fetchall()
-        out[f"by_{group}"] = [dict(r) for r in rows]
-    top = conn.execute(
-        f"{ENTRY_SELECT} ORDER BY (e.quantity * CAST(COALESCE({USD_FOR_FINISH}, {EUR_FOR_FINISH}) AS REAL)) "
-        "DESC NULLS LAST LIMIT 20"
-    ).fetchall()
-    out["top_cards"] = [entry_view(r, rates) for r in top]
-    return out
-
-
+DEFAULT_GROUPS = ("color_identity", "type", "set", "rarity", "finish", "condition", "language")
 _TYPE_ORDER = (
     "Creature",
     "Planeswalker",
@@ -392,37 +349,133 @@ _TYPE_ORDER = (
 )
 
 
-def _by_type(conn: sqlite3.Connection, rates: Rates) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        "SELECT c.type_line, c.oracle_id, e.quantity, e.finish, c.prices "
-        "FROM collection_entries e JOIN cards c ON c.id = e.card_id"
-    ).fetchall()
-    agg: dict[str, dict[str, Any]] = {
-        t: {"k": t, "cards": set(), "copies": 0, "usd": 0.0, "aud": 0.0} for t in _TYPE_ORDER
-    }
-    for r in rows:
-        front = (r["type_line"] or "").split(" // ")[0]
-        bucket = next((t for t in _TYPE_ORDER[:-1] if t in front), "Other")
-        a = agg[bucket]
-        a["cards"].add(r["oracle_id"])
-        a["copies"] += r["quantity"]
-        usd, eur = _finish_prices(json.loads(r["prices"] or "{}"), r["finish"])
-        if usd:
-            a["usd"] += float(usd) * r["quantity"]
-        aud = rates.aud(usd, eur)
-        if aud is not None:
-            a["aud"] += aud * r["quantity"]
-    return [
-        {
-            "k": t,
-            "cards": len(a["cards"]),
-            "copies": a["copies"],
-            "usd": round(a["usd"], 2),
-            "aud": round(a["aud"], 2),
-        }
-        for t, a in agg.items()
-        if a["copies"]
+def _type_bucket(type_line: str | None) -> str:
+    front = (type_line or "").split(" // ")[0]
+    return next((t for t in _TYPE_ORDER[:-1] if t in front), "Other")
+
+
+def summary(
+    conn: sqlite3.Connection, rates: Rates, group_by: list[str] | None = None
+) -> dict[str, Any]:
+    """Totals and breakdowns in one pass over the entries (narrow columns only)."""
+    groups = [
+        g for g in (group_by if group_by is not None else DEFAULT_GROUPS) if g in DEFAULT_GROUPS
     ]
+    rows = conn.execute(
+        "SELECT e.quantity, e.finish, e.condition, e.language, c.oracle_id, c.color_identity, "
+        "c.type_line, c.set_code, c.rarity, c.usd, c.usd_foil, c.usd_etched, c.eur, c.eur_foil, "
+        "c.eur_etched FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id"
+    ).fetchall()
+    totals: dict[str, Any] = {
+        "cards": set(),
+        "copies": 0,
+        "entries": 0,
+        "usd": 0.0,
+        "eur": 0.0,
+        "aud": 0.0,
+        "priced_entries": 0,
+    }
+    agg: dict[str, dict[str, dict[str, Any]]] = {g: {} for g in groups}
+
+    def bump(group: str, key: str, r: sqlite3.Row, usd: float | None, aud: float | None) -> None:
+        slot = agg[group].setdefault(
+            key, {"k": key, "cards": set(), "copies": 0, "usd": 0.0, "aud": 0.0}
+        )
+        slot["cards"].add(r["oracle_id"])
+        slot["copies"] += r["quantity"]
+        if usd is not None:
+            slot["usd"] += usd * r["quantity"]
+        if aud is not None:
+            slot["aud"] += aud * r["quantity"]
+
+    for r in rows:
+        if r["finish"] == "foil":
+            usd, eur = r["usd_foil"], r["eur_foil"]
+        elif r["finish"] == "etched":
+            usd, eur = r["usd_etched"], r["eur_etched"]
+        else:
+            usd, eur = r["usd"], r["eur"]
+        aud = rates.aud(usd, eur)
+        totals["cards"].add(r["oracle_id"])
+        totals["copies"] += r["quantity"]
+        totals["entries"] += 1
+        if usd is not None or eur is not None:
+            totals["priced_entries"] += 1
+        if usd is not None:
+            totals["usd"] += usd * r["quantity"]
+        if eur is not None:
+            totals["eur"] += eur * r["quantity"]
+        if aud is not None:
+            totals["aud"] += aud * r["quantity"]
+        keys = {
+            "color_identity": r["color_identity"] or "C",
+            "type": _type_bucket(r["type_line"]),
+            "set": r["set_code"],
+            "rarity": r["rarity"],
+            "finish": r["finish"],
+            "condition": r["condition"],
+            "language": r["language"],
+        }
+        for group in groups:
+            bump(group, keys[group], r, usd, aud)
+
+    has_rates = bool(rates.usd_aud or rates.eur_aud)
+    out: dict[str, Any] = {
+        "totals": {
+            "cards": len(totals["cards"]),
+            "copies": totals["copies"],
+            "entries": totals["entries"],
+            "usd": round(totals["usd"], 2),
+            "eur": round(totals["eur"], 2),
+            "aud": round(totals["aud"], 2) if has_rates else None,
+            "priced_entries": totals["priced_entries"],
+        },
+        "rates": {
+            "usd_aud": rates.usd_aud,
+            "eur_aud": rates.eur_aud,
+            "source": rates.source,
+            "day": rates.day,
+        },
+    }
+    for group in groups:
+        items = [
+            {
+                "k": s["k"],
+                "cards": len(s["cards"]),
+                "copies": s["copies"],
+                "usd": round(s["usd"], 2),
+                "aud": round(s["aud"], 2) if has_rates else None,
+            }
+            for s in agg[group].values()
+        ]
+        if group == "type":
+            items.sort(key=lambda s: _TYPE_ORDER.index(s["k"]))
+        else:
+            items.sort(key=lambda s: (-s["copies"], s["k"]))
+        if group == "set":
+            items = items[:30]
+        out[f"by_{group}"] = items
+    out["top_cards"] = top_entries(conn, rates, 20)
+    return out
+
+
+def top_entries(conn: sqlite3.Connection, rates: Rates, limit: int = 20) -> list[dict[str, Any]]:
+    """Entries by total value, fetched narrow first then hydrated."""
+    ids = [
+        r[0]
+        for r in conn.execute(
+            "SELECT e.id FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id "
+            f"ORDER BY (e.quantity * COALESCE({USD_FOR_FINISH}, {EUR_FOR_FINISH})) DESC NULLS LAST LIMIT ?",
+            (limit,),
+        )
+    ]
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(f"{ENTRY_SELECT} WHERE e.id IN ({marks})", ids).fetchall()
+    views = [entry_view(r, rates) for r in rows]
+    views.sort(key=lambda v: -(v["value"]["usd"] or v["value"]["eur"] or 0))
+    return views
 
 
 EXPORT_COLUMNS = [

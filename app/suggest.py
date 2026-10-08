@@ -131,12 +131,12 @@ def suggest(
     if exclude_deck_id is not None:
         where.append(
             "c.oracle_id NOT IN (SELECT c2.oracle_id FROM deck_cards dc "
-            "JOIN cards c2 ON c2.id = dc.card_id WHERE dc.deck_id = ?)"
+            "CROSS JOIN cards c2 ON c2.id = dc.card_id WHERE dc.deck_id = ?)"
         )
         params.append(exclude_deck_id)
     rows = conn.execute(
         "SELECT c.*, s.name AS set_name, SUM(e.quantity) AS owned_quantity FROM collection_entries e "
-        "JOIN cards c ON c.id = e.card_id JOIN sets s ON s.code = c.set_code "
+        "CROSS JOIN cards c ON c.id = e.card_id JOIN sets s ON s.code = c.set_code "
         f"WHERE {' AND '.join(where)} GROUP BY c.oracle_id",
         params,
     ).fetchall()

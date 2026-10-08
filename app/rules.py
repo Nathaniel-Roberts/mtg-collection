@@ -399,7 +399,7 @@ def ownership_report(
             params.append(deck_id)
         rows = conn.execute(
             f"SELECT c.oracle_id, c.name, d.id AS deck_id, d.name AS deck_name, SUM(dc.quantity) AS qty "
-            f"FROM deck_cards dc JOIN cards c ON c.id = dc.card_id JOIN decks d ON d.id = dc.deck_id "
+            f"FROM deck_cards dc CROSS JOIN cards c ON c.id = dc.card_id JOIN decks d ON d.id = dc.deck_id "
             f"WHERE c.oracle_id IN ({marks}) AND d.archived = 0 AND dc.role IN ('main','commander','companion'){extra} "
             "GROUP BY c.oracle_id, d.id ORDER BY c.name, d.name",
             params,

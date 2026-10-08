@@ -73,6 +73,27 @@ def _joined(obj: dict[str, Any], key: str) -> str | None:
     return " // ".join(parts) if parts else None
 
 
+PRICE_KEYS = ("usd", "usd_foil", "usd_etched", "eur", "eur_foil", "eur_etched", "tix")
+
+
+def _num(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _price_usd(prices: dict[str, Any]) -> float | None:
+    for key in ("usd", "usd_foil", "usd_etched"):
+        value = prices.get(key)
+        if value:
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return None
+
+
 def card_row(obj: dict[str, Any], run_id: int, now: str) -> dict[str, Any]:
     """Map a Scryfall card object onto a ``cards`` row."""
     front, back = _face_images(obj)
@@ -137,6 +158,13 @@ def card_row(obj: dict[str, Any], run_id: int, now: str) -> dict[str, Any]:
         "image_back_normal": back.get("normal") if back else None,
         "card_faces": json.dumps(face_summary) if face_summary else None,
         "prices": json.dumps(obj.get("prices") or {}),
+        "price_usd": _price_usd(obj.get("prices") or {}),
+        **{k: _num((obj.get("prices") or {}).get(k)) for k in PRICE_KEYS},
+        "legal_formats": " "
+        + " ".join(
+            f for f, v in (obj.get("legalities") or {}).items() if v in ("legal", "restricted")
+        )
+        + " ",
         "scryfall_uri": obj.get("scryfall_uri"),
         "updated_at": now,
         "seen_in_sync": run_id,
@@ -225,6 +253,33 @@ def upsert_cards(conn: sqlite3.Connection, cards: Iterable[dict[str, Any]], run_
     return total
 
 
+def mark_canonical(conn: sqlite3.Connection) -> int:
+    """Flag one printing per oracle_id: English, paper, non-digital, most recent."""
+    with db.transaction(conn):
+        conn.execute("DROP TABLE IF EXISTS temp.canon")
+        conn.execute(
+            """
+            CREATE TEMP TABLE canon AS
+            SELECT rid FROM (
+              SELECT rowid AS rid, ROW_NUMBER() OVER (
+                PARTITION BY COALESCE(oracle_id, id)
+                ORDER BY (lang = 'en') DESC, paper DESC, digital ASC, released_at DESC, collector_number
+              ) AS rn FROM cards
+            ) WHERE rn = 1
+            """
+        )
+        conn.execute(
+            "UPDATE cards SET is_canonical = 0 WHERE is_canonical = 1 "
+            "AND rowid NOT IN (SELECT rid FROM temp.canon)"
+        )
+        cur = conn.execute(
+            "UPDATE cards SET is_canonical = 1 WHERE is_canonical = 0 "
+            "AND rowid IN (SELECT rid FROM temp.canon)"
+        )
+        conn.execute("DROP TABLE temp.canon")
+    return cur.rowcount
+
+
 def sync_catalogue(
     conn: sqlite3.Connection,
     client: ScryfallClient,
@@ -249,6 +304,8 @@ def sync_catalogue(
             sets = client.sets()
         n_sets = upsert_sets(conn, sets)
         n_cards = upsert_cards(conn, cards, run_id)
+        mark_canonical(conn)
+        conn.execute("ANALYZE")
         conn.execute("INSERT INTO cards_fts(cards_fts) VALUES ('optimize')")
         finish_run(
             conn,

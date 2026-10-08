@@ -9,21 +9,23 @@ from app.pricing.fx import Rates
 
 PRICE_KEYS = ("usd", "usd_foil", "usd_etched", "eur", "eur_foil", "eur_etched", "tix")
 
-# SQL fragments that pick the price for an entry's finish from the card's prices JSON.
+# SQL fragments that pick the price for an entry's finish from the card's numeric price
+# columns (filled at sync time; parsing the prices JSON per expression was the main cost
+# in summaries).
 USD_FOR_FINISH = (
-    "CASE e.finish WHEN 'foil' THEN json_extract(c.prices, '$.usd_foil') "
-    "WHEN 'etched' THEN json_extract(c.prices, '$.usd_etched') ELSE json_extract(c.prices, '$.usd') END"
+    "CASE e.finish WHEN 'foil' THEN c.usd_foil WHEN 'etched' THEN c.usd_etched ELSE c.usd END"
 )
 EUR_FOR_FINISH = (
-    "CASE e.finish WHEN 'foil' THEN json_extract(c.prices, '$.eur_foil') "
-    "WHEN 'etched' THEN json_extract(c.prices, '$.eur_etched') ELSE json_extract(c.prices, '$.eur') END"
+    "CASE e.finish WHEN 'foil' THEN c.eur_foil WHEN 'etched' THEN c.eur_etched ELSE c.eur END"
 )
 
 
 def snapshot_prices(conn: sqlite3.Connection, day: str) -> int:
     """Record today's prices for every card that is owned or in a deck."""
     cols = ", ".join(PRICE_KEYS)
-    extracts = ", ".join(f"json_extract(prices, '$.{k}')" for k in PRICE_KEYS)
+    extracts = ", ".join(
+        f"json_extract(prices, '$.{k}')" for k in PRICE_KEYS
+    )  # strings, as Scryfall gives them
     with db.transaction(conn):
         cur = conn.execute(
             f"""
@@ -54,7 +56,7 @@ def collection_totals(conn: sqlite3.Connection, rates: Rates) -> dict[str, float
                    WHEN {USD_FOR_FINISH} IS NOT NULL THEN CAST({USD_FOR_FINISH} AS REAL) * :usd_aud
                    WHEN {EUR_FOR_FINISH} IS NOT NULL THEN CAST({EUR_FOR_FINISH} AS REAL) * :eur_aud
                    ELSE 0 END), 0) AS aud
-        FROM collection_entries e JOIN cards c ON c.id = e.card_id
+        FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id
         """,
         {"usd_aud": rates.usd_aud or 0.0, "eur_aud": rates.eur_aud or 0.0},
     ).fetchone()

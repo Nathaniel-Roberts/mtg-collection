@@ -16,7 +16,7 @@ FINISHES = ("nonfoil", "foil", "etched")
 SORTS = {
     "name": "c.name COLLATE NOCASE ASC, c.released_at DESC",
     "released": "c.released_at DESC, c.collector_number ASC",
-    "usd": "CAST(json_extract(c.prices, '$.usd') AS REAL) DESC NULLS LAST, c.name ASC",
+    "usd": "c.price_usd DESC NULLS LAST, c.name ASC",
     "edhrec": "c.edhrec_rank ASC NULLS LAST, c.name ASC",
     "cmc": "c.cmc ASC, c.name ASC",
 }
@@ -89,16 +89,31 @@ def card_view(
     return view
 
 
+# Owned copies are aggregated once per query and joined by oracle_id. A correlated
+# subquery here cost about 60 microseconds per candidate row (two seconds on a 37k-row
+# sort). CROSS JOIN pins the loop order: iterate the small entries table, look cards up
+# by primary key. Without it the planner sometimes scanned all 118k cards instead.
+OWNED_BY_ORACLE = (
+    "SELECT c2.oracle_id, SUM(e.quantity) AS q FROM collection_entries e "
+    "CROSS JOIN cards c2 ON c2.id = e.card_id GROUP BY c2.oracle_id"
+)
 CARD_SELECT = (
+    "SELECT c.*, s.name AS set_name, COALESCE(o.q, 0) AS owned_quantity "
+    "FROM cards c JOIN sets s ON s.code = c.set_code "
+    f"LEFT JOIN ({OWNED_BY_ORACLE}) o ON o.oracle_id = c.oracle_id"
+)
+# For single-row lookups a correlated subquery that starts from the card's own oracle_id
+# is far cheaper than aggregating every owned entry first.
+CARD_SELECT_ONE = (
     "SELECT c.*, s.name AS set_name, "
-    "(SELECT COALESCE(SUM(e.quantity), 0) FROM collection_entries e "
-    " JOIN cards c2 ON c2.id = e.card_id WHERE c2.oracle_id = c.oracle_id) AS owned_quantity "
+    "(SELECT COALESCE(SUM(e.quantity), 0) FROM cards c2 CROSS JOIN collection_entries e "
+    " ON e.card_id = c2.id WHERE c2.oracle_id = c.oracle_id) AS owned_quantity "
     "FROM cards c JOIN sets s ON s.code = c.set_code"
 )
 
 
 def get_card(conn: sqlite3.Connection, card_id: str) -> sqlite3.Row | None:
-    return conn.execute(f"{CARD_SELECT} WHERE c.id = ?", (card_id,)).fetchone()
+    return conn.execute(f"{CARD_SELECT_ONE} WHERE c.id = ?", (card_id,)).fetchone()
 
 
 def get_cards(conn: sqlite3.Connection, ids: list[str]) -> dict[str, sqlite3.Row]:
@@ -123,7 +138,7 @@ def by_set_and_number(
     candidates = [number, number.lstrip("0") or number]
     for n in dict.fromkeys(candidates):
         params: list[Any] = [set_code.lower(), n]
-        sql = f"{CARD_SELECT} WHERE c.set_code = ? AND c.collector_number = ?"
+        sql = f"{CARD_SELECT_ONE} WHERE c.set_code = ? AND c.collector_number = ?"
         if lang:
             sql += " AND c.lang = ?"
             params.append(lang)
@@ -141,7 +156,7 @@ def by_exact_name(
     conn: sqlite3.Connection, name: str, set_code: str | None = None
 ) -> sqlite3.Row | None:
     """Latest paper printing with this exact (case-insensitive) name, optionally in a set."""
-    sql = f"{CARD_SELECT} WHERE c.name = ? COLLATE NOCASE"
+    sql = f"{CARD_SELECT_ONE} WHERE c.name = ? COLLATE NOCASE"
     params: list[Any] = [name]
     if set_code:
         sql += " AND c.set_code = ?"
@@ -150,38 +165,62 @@ def by_exact_name(
     if row is None and " // " not in name:
         # A single face of a double-faced card.
         row = conn.execute(
-            f"{CARD_SELECT} WHERE (c.name LIKE ? OR c.name LIKE ?) COLLATE NOCASE {_PREFER}",
+            f"{CARD_SELECT_ONE} WHERE (c.name LIKE ? OR c.name LIKE ?) COLLATE NOCASE {_PREFER}",
             (f"{name} // %", f"% // {name}"),
         ).fetchone()
     return row
 
 
+_NAME_PUNCT = re.compile(r"[^a-z0-9 ]+")
+
+
+def normalise_name(name: str) -> str:
+    """Front face only, lower case, apostrophes dropped, other punctuation as spaces."""
+    front = name.split(" // ")[0].lower().replace("'", "").replace("’", "")
+    return re.sub(r"\s+", " ", _NAME_PUNCT.sub(" ", front)).strip()
+
+
 class NameIndex:
-    """Distinct card names for fuzzy matching, rebuilt lazily after each catalogue sync."""
+    """Normalised card names for fuzzy matching, rebuilt lazily after each catalogue sync.
+
+    Plain ``fuzz.ratio`` over normalised names measured best on real misspellings
+    (RESEARCH-level check on the full catalogue, 09/10/2026): the token and partial
+    scorers favour short names such as "Jace" or "Elf" over the intended card.
+    """
 
     def __init__(self) -> None:
-        self._names: list[str] = []
+        self._keys: list[str] = []
+        self._by_key: dict[str, str] = {}
         self._version: int = -1
 
     def names(self, conn: sqlite3.Connection) -> list[str]:
+        self._refresh(conn)
+        return list(self._by_key.values())
+
+    def _refresh(self, conn: sqlite3.Connection) -> None:
         version = int(
             conn.execute(
                 "SELECT COALESCE(MAX(id), 0) FROM sync_runs WHERE kind = 'catalogue'"
             ).fetchone()[0]
         )
-        if version != self._version:
-            self._names = [
-                r[0] for r in conn.execute("SELECT DISTINCT name FROM cards ORDER BY name")
-            ]
-            self._version = version
-        return self._names
+        if version == self._version:
+            return
+        by_key: dict[str, str] = {}
+        for (name,) in conn.execute("SELECT DISTINCT name FROM cards ORDER BY name"):
+            by_key.setdefault(normalise_name(name), name)
+        self._by_key = by_key
+        self._keys = list(by_key)
+        self._version = version
 
-    def best(self, conn: sqlite3.Connection, query: str, cutoff: int = 85) -> str | None:
-        names = self.names(conn)
-        if not names:
+    def best(self, conn: sqlite3.Connection, query: str, cutoff: int = 84) -> str | None:
+        self._refresh(conn)
+        key = normalise_name(query)
+        if not key or not self._keys:
             return None
-        match = process.extractOne(query, names, scorer=fuzz.WRatio, score_cutoff=cutoff)
-        return match[0] if match else None
+        if key in self._by_key:
+            return self._by_key[key]
+        match = process.extractOne(key, self._keys, scorer=fuzz.ratio, score_cutoff=cutoff)
+        return self._by_key[match[0]] if match else None
 
 
 def fuzzy_name(
@@ -279,47 +318,52 @@ def search(
         where.append("c.cmc <= ?")
         params.append(cmc_max)
     if legal_in:
-        where.append("json_extract(c.legalities, ?) IN ('legal', 'restricted')")
-        params.append(f"$.{legal_in}")
+        where.append("instr(c.legal_formats, ?) > 0")
+        params.append(f" {legal_in} ")
     if paper_only:
         where.append("c.paper = 1")
+    from_sql = "FROM cards c"
     if owned:
-        where.append(
-            "c.oracle_id IN (SELECT c2.oracle_id FROM collection_entries e "
-            "JOIN cards c2 ON c2.id = e.card_id)"
+        # A join beats IN (...) here by about five times and EXISTS by a hundred.
+        from_sql += (
+            " JOIN (SELECT DISTINCT c2.oracle_id FROM collection_entries e "
+            "CROSS JOIN cards c2 ON c2.id = e.card_id) o ON o.oracle_id = c.oracle_id"
         )
     clause = " AND ".join(where) or "1 = 1"
     order = SORTS.get(sort, SORTS["name"])
 
-    if unique == "prints":
-        base = f"{CARD_SELECT} WHERE {clause}"
-        count_sql = f"SELECT COUNT(*) FROM cards c WHERE {clause}"
-    else:
-        # One row per oracle_id: the most recent paper printing, English first.
-        base = (
-            f"{CARD_SELECT} WHERE c.rowid IN ("
-            "  SELECT rowid FROM (SELECT c.rowid, ROW_NUMBER() OVER (PARTITION BY c.oracle_id "
-            "    ORDER BY (c.lang = 'en') DESC, c.paper DESC, c.digital ASC, c.released_at DESC, "
-            f"    c.collector_number) AS rn FROM cards c WHERE {clause}) WHERE rn = 1)"
-        )
-        count_sql = f"SELECT COUNT(DISTINCT c.oracle_id) FROM cards c WHERE {clause}"
+    # "cards" means one row per oracle_id: the canonical printing flagged at sync time.
+    # A set filter implies printings, since the canonical printing is usually elsewhere.
+    if unique == "cards" and not set_code:
+        clause = f"c.is_canonical = 1 AND {clause}"
+    count_sql = f"SELECT COUNT(*) {from_sql} WHERE {clause}"
     total = conn.execute(count_sql, params).fetchone()[0]
     offset = (max(1, page) - 1) * per_page
+    # Sort and page on narrow rows first; fetching c.* (with its JSON columns) for every
+    # candidate before sorting cost over a second per page on the full catalogue.
+    page_sql = f"SELECT c.rowid {from_sql} WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?"
+    rowids = [r[0] for r in conn.execute(page_sql, [*params, per_page, offset])]
+    if not rowids:
+        return [], total
+    marks = ",".join("?" * len(rowids))
     rows = conn.execute(
-        f"{base} ORDER BY {order} LIMIT ? OFFSET ?", [*params, per_page, offset]
+        f"{CARD_SELECT} WHERE c.rowid IN ({marks}) ORDER BY {order}", rowids
     ).fetchall()
     return rows, total
 
 
 def list_sets(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT s.*,
-          (SELECT COUNT(DISTINCT c.oracle_id) FROM collection_entries e
-             JOIN cards c ON c.id = e.card_id WHERE c.set_code = s.code) AS owned_cards,
-          (SELECT COALESCE(SUM(e.quantity), 0) FROM collection_entries e
-             JOIN cards c ON c.id = e.card_id WHERE c.set_code = s.code) AS owned_copies
-        FROM sets s ORDER BY s.released_at DESC, s.name
-        """
-    ).fetchall()
-    return [dict(r) for r in rows]
+    owned = {
+        r["set_code"]: (r["cards"], r["copies"])
+        for r in conn.execute(
+            "SELECT c.set_code, COUNT(DISTINCT c.oracle_id) AS cards, SUM(e.quantity) AS copies "
+            "FROM collection_entries e CROSS JOIN cards c ON c.id = e.card_id GROUP BY c.set_code"
+        )
+    }
+    rows = conn.execute("SELECT * FROM sets ORDER BY released_at DESC, name").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["owned_cards"], d["owned_copies"] = owned.get(r["code"], (0, 0))
+        out.append(d)
+    return out

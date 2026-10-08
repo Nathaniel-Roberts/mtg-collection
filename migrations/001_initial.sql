@@ -52,6 +52,10 @@ CREATE TABLE cards (
   image_back_normal TEXT,
   card_faces TEXT,
   prices TEXT NOT NULL DEFAULT '{}',
+  price_usd REAL,                   -- usd, else usd_foil, else usd_etched; for sorting
+  usd REAL, usd_foil REAL, usd_etched REAL, eur REAL, eur_foil REAL, eur_etched REAL, tix REAL,
+  legal_formats TEXT NOT NULL DEFAULT ' ',  -- ' commander modern ' for legal or restricted formats
+  is_canonical INTEGER NOT NULL DEFAULT 0,  -- one printing per oracle_id, shown in "cards" searches
   scryfall_uri TEXT,
   updated_at TEXT NOT NULL,
   seen_in_sync INTEGER NOT NULL DEFAULT 0
@@ -60,6 +64,24 @@ CREATE INDEX cards_oracle ON cards(oracle_id);
 CREATE INDEX cards_set_number ON cards(set_code, collector_number);
 CREATE INDEX cards_name ON cards(name COLLATE NOCASE);
 CREATE INDEX cards_illustration ON cards(illustration_id);
+CREATE INDEX cards_canonical_name ON cards(is_canonical, name COLLATE NOCASE);
+CREATE INDEX cards_canonical_released ON cards(is_canonical, released_at);
+CREATE INDEX cards_price ON cards(price_usd);
+CREATE INDEX cards_edhrec ON cards(edhrec_rank);
+CREATE INDEX cards_cmc ON cards(cmc);
+-- Covering index for joins from collection_entries and deck_cards by card id: the
+-- columns summaries, ownership checks and value sorts need, so those joins never read
+-- the wide rows (oracle text, JSON).
+CREATE INDEX cards_by_id ON cards(
+  id, oracle_id, name, set_code, collector_number, lang, rarity, type_line, color_identity, colors,
+  cmc, usd, usd_foil, usd_etched, eur, eur_foil, eur_etched, price_usd, released_at, edhrec_rank
+);
+-- Covering index for filter-only catalogue searches: every column those queries touch,
+-- so the planner never has to read the wide rows (oracle text, JSON) for 37k candidates.
+CREATE INDEX cards_search ON cards(
+  is_canonical, paper, name COLLATE NOCASE, released_at, color_identity, colors, type_line,
+  legal_formats, rarity, cmc, edhrec_rank, price_usd, oracle_id, set_code, digital
+);
 
 CREATE VIRTUAL TABLE cards_fts USING fts5(
   name, printed_name, type_line, oracle_text,
@@ -74,7 +96,10 @@ CREATE TRIGGER cards_ad AFTER DELETE ON cards BEGIN
   INSERT INTO cards_fts(cards_fts, rowid, name, printed_name, type_line, oracle_text)
   VALUES ('delete', old.rowid, old.name, old.printed_name, old.type_line, old.oracle_text);
 END;
-CREATE TRIGGER cards_au AFTER UPDATE ON cards BEGIN
+CREATE TRIGGER cards_au AFTER UPDATE ON cards
+WHEN old.name IS NOT new.name OR old.printed_name IS NOT new.printed_name
+  OR old.type_line IS NOT new.type_line OR old.oracle_text IS NOT new.oracle_text
+BEGIN
   INSERT INTO cards_fts(cards_fts, rowid, name, printed_name, type_line, oracle_text)
   VALUES ('delete', old.rowid, old.name, old.printed_name, old.type_line, old.oracle_text);
   INSERT INTO cards_fts(rowid, name, printed_name, type_line, oracle_text)
