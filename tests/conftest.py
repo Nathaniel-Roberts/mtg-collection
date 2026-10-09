@@ -24,6 +24,7 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         "dev_mode": True,
         "sync_on_start": False,
         "fx_provider": "manual",
+        "scanner_enabled": False,
         "_env_file": None,
     }
     values.update(overrides)

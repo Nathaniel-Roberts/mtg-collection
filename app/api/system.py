@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -47,6 +48,7 @@ def status(
     out["version"] = request.app.state.version
     out["access_enabled"] = settings.access_enabled
     out["dev_mode"] = settings.dev_mode
+    out["scanner"] = request.app.state.scanner.status()
     return out
 
 
@@ -84,6 +86,27 @@ def write_settings(body: SettingsUpdate, conn: sqlite3.Connection = Depends(get_
                     conn, key, str(value).lower() if isinstance(value, bool) else str(value)
                 )
     return {key: db.get_setting(conn, key) for key in SETTING_KEYS}
+
+
+@router.get("/backup")
+def backup(settings: Settings = Depends(get_settings)):
+    """A consistent copy of the SQLite database, made with the online backup API."""
+    import sqlite3 as _sqlite3
+    import tempfile
+    from datetime import datetime
+
+    from fastapi.responses import FileResponse
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = Path(tempfile.gettempdir()) / f"mtg-collection-{stamp}.db"
+    source = _sqlite3.connect(str(settings.db_path))
+    dest = _sqlite3.connect(str(target))
+    try:
+        source.backup(dest)
+    finally:
+        dest.close()
+        source.close()
+    return FileResponse(target, media_type="application/vnd.sqlite3", filename=target.name)
 
 
 @router.get("/formats")

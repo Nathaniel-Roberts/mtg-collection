@@ -14,6 +14,12 @@ dependencies = [
     "python-multipart>=0.0.20",
     "rapidfuzz>=3.13",
     "tzdata>=2025.1",
+    "collectorvision[hf]",
+    "onnxruntime>=1.30.0",
+    "opencv-python-headless>=5.0.0.93",
+    "rapidocr>=3.10.0",
+    "numpy>=2",
+    "pillow>=12.3.0",
 ]
 
 [dependency-groups]
@@ -41,3 +47,6 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.File", "f
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120
+
+[tool.uv.sources]
+collectorvision = { git = "https://github.com/HanClinto/CollectorVision.git", rev = "8b295ab80a997766afc00c640a616c1f2716df21" }

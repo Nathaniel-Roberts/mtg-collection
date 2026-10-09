@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     fx_eur_aud: float | None = None
     frankfurter_base: str = "https://api.frankfurter.dev/v1"
 
+    scanner_enabled: bool = True
     scan_gap: float = 0.10
     scan_min_score: float = 0.55
     scan_keep_images: int = 200

@@ -14,10 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import db, scheduler
-from app.api import cards, collection, decks, system
+from app.api import cards, collection, decks, scan, system
 from app.auth import AccessVerifier
 from app.catalogue import NameIndex
 from app.config import Settings, load_settings
+from app.scan.service import Scanner
 from app.scryfall.client import ScryfallClient
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,8 @@ def create_app(settings: Settings | None = None, *, run_scheduler: bool = True) 
             if run_scheduler
             else None
         )
+        if run_scheduler and settings.scanner_enabled:
+            app.state.background.add(asyncio.create_task(asyncio.to_thread(app.state.scanner.warm)))
         try:
             yield
         finally:
@@ -86,11 +89,13 @@ def create_app(settings: Settings | None = None, *, run_scheduler: bool = True) 
     app.state.runner = scheduler.JobRunner(settings, app.state.scryfall)
     app.state.name_index = NameIndex()
     app.state.background = set()
+    app.state.scanner = Scanner(settings)
 
     app.include_router(system.router)
     app.include_router(cards.router)
     app.include_router(collection.router)
     app.include_router(decks.router)
+    app.include_router(scan.router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:
@@ -113,5 +118,14 @@ def create_app(settings: Settings | None = None, *, run_scheduler: bool = True) 
             @app.get("/", include_in_schema=False)
             def root() -> FileResponse:
                 return FileResponse(index)
+
+        sw = STATIC_DIR / "sw.js"
+        if sw.exists():
+            # Served from the root so the service worker scope covers the whole app.
+            @app.get("/sw.js", include_in_schema=False)
+            def service_worker() -> FileResponse:
+                return FileResponse(
+                    sw, media_type="text/javascript", headers={"Cache-Control": "no-cache"}
+                )
 
     return app
