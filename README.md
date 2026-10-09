@@ -4,9 +4,9 @@ Self-hosted Magic: The Gathering collection manager: phone-camera scanning, a da
 everything you own with daily Scryfall prices and AUD conversion, deck building, and an
 MCP server so an AI assistant can see the collection and build decks from it.
 
-Status: Phase 3 (backend, PWA and scanner). See ARCHITECTURE.md for the design and
-RESEARCH.md for the research behind it. The MCP server and the Docker release pipeline
-arrive in the next phases.
+Status: Phase 4 (backend, PWA, scanner and MCP server). See ARCHITECTURE.md for the design and
+RESEARCH.md for the research behind it. The Docker release pipeline and deployment guide arrive
+in the next phase.
 
 ## How identification works
 

@@ -12,12 +12,14 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from app import db, scheduler
 from app.api import cards, collection, decks, scan, system
 from app.auth import AccessVerifier
 from app.catalogue import NameIndex
 from app.config import Settings, load_settings
+from app.mcp_server import build_mcp_server, mcp_asgi_app
 from app.scan.service import Scanner
 from app.scryfall.client import ScryfallClient
 
@@ -67,7 +69,8 @@ def create_app(settings: Settings | None = None, *, run_scheduler: bool = True) 
         if run_scheduler and settings.scanner_enabled:
             app.state.background.add(asyncio.create_task(asyncio.to_thread(app.state.scanner.warm)))
         try:
-            yield
+            async with app.state.mcp_server.session_manager.run():
+                yield
         finally:
             if task:
                 task.cancel()
@@ -90,6 +93,12 @@ def create_app(settings: Settings | None = None, *, run_scheduler: bool = True) 
     app.state.name_index = NameIndex()
     app.state.background = set()
     app.state.scanner = Scanner(settings)
+    app.state.mcp_server = build_mcp_server(settings, app.state.name_index, app_version())
+    mcp_endpoint = mcp_asgi_app(app.state.mcp_server, settings, app.state.access_verifier)
+    for mcp_path in ("/mcp", "/mcp/"):
+        app.router.routes.append(
+            Route(mcp_path, endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"], name="mcp")
+        )
 
     app.include_router(system.router)
     app.include_router(cards.router)

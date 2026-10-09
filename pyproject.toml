@@ -20,6 +20,7 @@ dependencies = [
     "rapidocr>=3.10.0",
     "numpy>=2",
     "pillow>=12.3.0",
+    "mcp>=2.3,<3",
 ]
 
 [dependency-groups]

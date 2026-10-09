@@ -4,6 +4,11 @@ All notable changes to this project are recorded here. Dates are DD/MM/YYYY.
 
 ## Unreleased
 
+- MCP server at `/mcp` (Streamable HTTP, mcp SDK 2.3): search_collection, search_cards,
+  get_card, collection_summary, list_decks, get_deck, create_deck, update_deck,
+  add_cards_to_deck, remove_cards_from_deck, validate_deck, suggest_from_collection,
+  deck_conflicts, delete_deck. Accepts a Cloudflare Access JWT (person or service token)
+  or the app-issued bearer token.
 - PWA: scan screen with camera capture, one-tap confirm, printing picker and name
   search fallback; collection list and grid with filters, sort and value summary; card
   detail with owned rows, printings, price history and legality; decks with validation,
