@@ -144,7 +144,7 @@ async def test_deck_lifecycle(app, conn):
         )
         assert d["total"] == 99 and d["validation"]["problems"][0]["code"] == "deck_size"
         lst = await call(client, "list_decks")
-        assert lst["items"][0]["name"] == "Atraxa" and lst["items"][0]["owned_percent"] > 90
+        assert lst["items"][0]["name"] == "Atraxa" and 50 < lst["items"][0]["owned_percent"] < 60
         d = await call(client, "update_deck", deck_id=deck_id, name="Atraxa v2", archived=True)
         assert d["name"] == "Atraxa v2" and d["archived"] is True
         assert (await call(client, "list_decks"))["items"] == []
