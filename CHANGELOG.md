@@ -2,8 +2,11 @@
 
 All notable changes to this project are recorded here. Dates are DD/MM/YYYY.
 
-## Unreleased
+## 0.1.0 - 09/10/2026
 
+- Docker image (amd64 and arm64) published to GHCR by GitHub Actions on every push to
+  main and every `v*` tag; docker-compose with cloudflared, healthcheck and a named
+  volume; deployment, Access, MCP connection, backup and release notes in the README.
 - MCP server at `/mcp` (Streamable HTTP, mcp SDK 2.3): search_collection, search_cards,
   get_card, collection_summary, list_decks, get_deck, create_deck, update_deck,
   add_cards_to_deck, remove_cards_from_deck, validate_deck, suggest_from_collection,

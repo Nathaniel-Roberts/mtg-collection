@@ -1,0 +1,40 @@
+# MTG Collection behind a Cloudflare Tunnel. See README.md, "Deploy".
+#
+# The app publishes no ports on purpose: the only way in is the tunnel, and Cloudflare
+# Access sits in front of the tunnel. For LAN testing uncomment the ports block and keep
+# it LAN-only; the app still insists on a valid Access JWT unless DEV_MODE=true.
+
+services:
+  app:
+    # GitHub Actions publishes this image on every tagged release (and :latest from main).
+    # Pin a version (for example :v0.1.0) if you prefer.
+    image: ghcr.io/nathaniel-roberts/mtg-collection:latest
+    container_name: mtg-collection
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - mtg-data:/data
+    # ports:
+    #   - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mtg-collection-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  mtg-data:

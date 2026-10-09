@@ -1,0 +1,10 @@
+.git
+.venv
+data
+tests/fixtures/photos
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.env
+RESEARCH.md

@@ -585,7 +585,26 @@ also offers a one-click download of the database and a CSV.
   value rollup with FX, Access JWT verification with a generated RSA key pair.
 - Ruff and pytest in GitHub Actions on every push.
 
-## 14. Phase plan
+## 14. Implementation notes (what changed while building)
+
+- The OCR strip is cut from a fresh aspect-correct warp of the original photo (744 by
+  1040) using the detector's corners, not from the 448 px square crop; text that small
+  needs the extra resolution. The strip is the bottom 11 percent at full width because
+  2003 to 2014 frames print the collector number at the end of the copyright line on the
+  right, while M15 frames print it bottom-left. Copyright years are stripped before
+  parsing because OCR misreads them as collector numbers.
+- The catalogue carries a canonical-printing flag, numeric price columns and a
+  legal-formats string set at sync time, plus covering indexes, because filter-only
+  searches over the 118k-row table otherwise read the wide JSON columns and took seconds.
+  Entries-to-cards joins use CROSS JOIN to pin the small table as the outer loop.
+- Fuzzy name matching uses plain ratio over normalised names (front face, lower case,
+  no punctuation); token scorers kept picking short names such as "Jace" or "Elf".
+- Scan records keep the dewarped crop for the last SCAN_KEEP_IMAGES scans so a real
+  photo test set can be assembled from confirmed scans.
+- The MCP tools take `limit` and `offset`; offset is rounded down to a multiple of limit.
+  All tools run their database work in a worker thread.
+
+## 15. Phase plan
 
 - Phase 2: migrations, config, db, Scryfall client and bulk sync, pricing and FX,
   scheduler, catalogue and collection modules, decks and rules, importers, JSON API,
